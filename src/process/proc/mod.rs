@@ -59,6 +59,7 @@ pub struct ProcExcl {
     pub channel: usize,
     /// 进程的唯一标识符（进程ID）。
     pub pid: usize,
+    pub trace_mask: u32,
 }
 
 
@@ -69,6 +70,7 @@ impl ProcExcl {
             exit_status: 0,
             channel: 0,
             pid: 0,
+            trace_mask: 0,
         }
     }
 
@@ -78,6 +80,7 @@ impl ProcExcl {
         self.channel = 0;
         self.exit_status = 0;
         self.state = ProcState::UNUSED;
+        self.trace_mask = 0;
     }
 }
 
@@ -381,6 +384,7 @@ pub struct Proc {
     pub data: UnsafeCell<ProcData>,
     /// 标识进程是否被杀死的原子布尔变量，用于调度和信号处理。
     pub killed: AtomicBool,
+
 }
 
 impl Proc {
@@ -496,9 +500,9 @@ impl Proc {
         sstatus::intr_on();
 
         let tf = unsafe { self.data.get_mut().tf.as_mut().unwrap() };
-        let a7 = tf.a7;
+        let num = tf.a7 as usize;
         tf.admit_ecall();
-        let sys_result = match a7 {
+        let sys_result = match num {
             1 => self.sys_fork(),
             2 => self.sys_exit(),
             3 => self.sys_wait(),
@@ -520,14 +524,69 @@ impl Proc {
             19 => self.sys_link(),
             20 => self.sys_mkdir(),
             21 => self.sys_close(),
+            22 => self.sys_trace(),
             _ => {
-                panic!("unknown syscall num: {}", a7);
+                panic!("unknown syscall num: {}", num);
             }
         };
-        tf.a0 = match sys_result {
-            Ok(ret) => ret,
-            Err(()) => -1isize as usize,
+        let ret: isize = match sys_result {
+            Ok(v) => v as isize,
+            Err(()) => -1,
         };
+
+        // 写回 a0，让用户态拿到返回值
+        tf.a0 = ret as usize;
+
+        self.trace_syscall(num, ret);
+    }
+
+    /// 根据当前进程的 trace_mask 决定是否打印这次系统调用
+    fn trace_syscall(&self, num: usize, ret: isize) {
+        // 先拿到 pid 和 trace_mask
+        let (pid, mask) = {
+            let excl = self.excl.lock();
+            (excl.pid, excl.trace_mask)
+        };
+
+        // 可选：越界保护（你的 trace_mask 是 u32，最多 32bit）
+        if num >= 32 {
+            return;
+        }
+
+        // 如果对应位没开，则不打印
+        if (mask & (1u32 << num)) == 0 {
+            return;
+        }
+
+        // syscall 名字表：你可以单写一个函数，也可以直接用 match
+        let name = match num {
+            1  => "fork",
+            2  => "exit",
+            3  => "wait",
+            4  => "pipe",
+            5  => "read",
+            6  => "kill",
+            7  => "exec",
+            8  => "fstat",
+            9  => "chdir",
+            10 => "dup",
+            11 => "getpid",
+            12 => "sbrk",
+            13 => "sleep",
+            14 => "uptime",
+            15 => "open",
+            16 => "write",
+            17 => "mknod",
+            18 => "unlink",
+            19 => "link",
+            20 => "mkdir",
+            21 => "close",
+            22 => "trace",
+            _  => "unknown",
+        };
+
+        // 实验要求的格式："<pid>: syscall <name> -> <ret>"
+        println!("{}: syscall {} -> {}", pid, name, ret);
     }
 
     /// # 功能说明
@@ -661,6 +720,10 @@ impl Proc {
     /// - 调用者需保证进程状态和私有数据在调用时无并发冲突。
     /// - 子进程资源清理确保不产生内存泄漏和悬挂指针。
     fn fork(&mut self) -> Result<usize, ()> {
+        let parent_trace_mask = {
+        let pexcl = self.excl.lock();
+        pexcl.trace_mask
+    };
         let pdata = self.data.get_mut();
         let child = unsafe { PROC_MANAGER.alloc_proc().ok_or(())? };
         let mut cexcl = child.excl.lock();
@@ -690,6 +753,8 @@ impl Proc {
         
         // copy process name
         cdata.name.copy_from_slice(&pdata.name);
+
+        cexcl.trace_mask = parent_trace_mask;
 
         let cpid = cexcl.pid;
 

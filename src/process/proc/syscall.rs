@@ -39,6 +39,7 @@ pub trait Syscall {
     fn sys_link(&mut self) -> SysResult;
     fn sys_mkdir(&mut self) -> SysResult;
     fn sys_close(&mut self) -> SysResult;
+    fn sys_trace(&mut self) -> SysResult;
 }
 
 impl Syscall for Proc {
@@ -144,6 +145,12 @@ impl Syscall for Proc {
 
     /// Load an elf binary and execuate it the currrent process context.
     fn sys_exec(&mut self) -> SysResult {
+        let guard = self.excl.lock();
+        if guard.pid == 1 {
+            let data = self.data.get_mut();
+            data.pagetable.as_ref().unwrap().vm_print(0);
+        }
+        drop(guard);
         let mut path: [u8; MAXPATH] = [0; MAXPATH];
         self.arg_str(0, &mut path).map_err(syscall_warning)?;
 
@@ -496,6 +503,20 @@ impl Syscall for Proc {
         println!("[{}].close(fd={}), file={:?}", self.excl.lock().pid, fd, file);
 
         drop(file);
+        Ok(0)
+    }
+
+    fn sys_trace(&mut self) -> SysResult {
+        // 1. 取第 0 个参数：mask (用户传入的整数)
+        let mask = self.arg_i32(0) as u32;
+
+        // 2. 写进当前进程的 ProcExcl 里
+        {
+            let mut excl = self.excl.lock();
+            excl.trace_mask = mask;
+        }
+
+        // 3. 按实验要求，trace 返回 0 表示成功
         Ok(0)
     }
 }

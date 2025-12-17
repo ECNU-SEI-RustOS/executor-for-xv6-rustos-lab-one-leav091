@@ -199,6 +199,43 @@ impl PageTable {
         }
     }
 
+    pub fn vm_print(&self, level: usize) {
+        // 顶层先打印 page table 地址
+        if level == 0 {
+            let pt_va = self as *const _ as usize;
+            println!("page table {:#x}", pt_va);
+        }
+
+        // 遍历当前页表的 512 项
+        for idx in 0..512 {
+            let pte = &self.data[idx];
+
+            // 无效项直接跳过
+            if !pte.is_valid() {
+                continue;
+            }
+
+            // 提取物理地址
+            let pa = pte.as_phys_addr().as_usize();
+            let pte_val = pte.data; // 同一模块内，可以访问 data 字段
+
+            // 打印缩进：" .." * (level + 1)
+            // 顶层 level=0 时打印一次 " .."
+            for _ in 0..=level {
+                print!(" ..");
+            }
+
+            // 格式：索引 + pte + pa（都是十六进制）
+            println!("{}: pte {:#x} pa {:#x}", idx, pte_val, pa);
+
+            // 如果是中间页表（V=1 且 R/W/X 都为 0），递归打印下一层
+            if !pte.is_leaf() {
+                // as_page_table 返回的是 *mut PageTable，对应下一层页表
+                let child_pt = unsafe { &*pte.as_page_table() };
+                child_pt.vm_print(level + 1);
+            }
+        }
+    }
     /// Convert the page table to be the usize
     /// that can be written in satp register
     pub fn as_satp(&self) -> usize {
